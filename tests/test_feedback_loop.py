@@ -120,7 +120,9 @@ def test_accept_sets_chosen_candidate() -> None:
     ]
     final = run_pipeline(final)
     assert final.chosen_candidate_id == top_id
-    assert final.phase == "done"
+    assert final.phase == "plan"  # acceptance routes through taste into copilot
+    assert final.plan is not None
+    assert final.plan.candidate_id == top_id
     assert final.loop_count == 0
 
 

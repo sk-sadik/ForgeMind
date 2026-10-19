@@ -19,10 +19,15 @@ Flow::
                                                  (refine + loops left) /       \\ (no feedback)
                                                                         v         \\
                                                                     taste --> generate
-                                                                        (else END)
+                                                                     |  \\
+                                          (accepted, no plan yet) ---/    \\--- else END
+                                                                        v
+                                                                     copilot --> END
 
 Sessions that start with ``pending_feedback`` (user swiped cards after a
-previous run) skip the interview and enter at ``feedback``.
+previous run) skip the interview and enter at ``feedback``. Accepting a
+candidate routes through taste into the copilot, which builds the
+``ProjectPlan`` (phase ``"plan"``).
 
 Every node persists the full state via ``memory.db.save_state`` (inside the
 agents + a wrapper-level save), so sessions can resume at any phase.
@@ -35,6 +40,7 @@ from typing import Any, Callable
 from langgraph.graph import END, START, StateGraph
 
 from . import state as S
+from .agents.copilot import run_copilot
 from .agents.critic import run_critic
 from .agents.feasibility import run_feasibility
 from .agents.generators import run_generators
@@ -173,6 +179,8 @@ def _feedback_node(state: S.ForgeMindState) -> S.ForgeMindState:
             state.chosen_candidate_id = fb.candidate_id
     if refinements:
         state.refinement_text = " ".join(refinements)
+    else:
+        state.refinement_text = None  # batch without refine: drop stale requests
     state.pending_feedback = []
 
     db.save_state(state)
@@ -188,9 +196,14 @@ def _route_feedback(state: S.ForgeMindState | dict[str, Any]) -> str:
 
 
 def _route_taste(state: S.ForgeMindState | dict[str, Any]) -> str:
-    """Taste node sets phase='generate' when it wants a refinement loop."""
+    """Refinement loop first; otherwise build the plan when the user accepted
+    a candidate and no plan exists yet."""
     state = _coerce(state)
-    return "generate" if state.phase == "generate" else "end"
+    if state.phase == "generate":
+        return "generate"
+    if state.chosen_candidate_id and state.plan is None:
+        return "copilot"
+    return "end"
 
 
 def _ranker_node(state: S.ForgeMindState) -> S.ForgeMindState:
@@ -272,6 +285,7 @@ def build_graph():
     graph.add_node("present", _wrap(_present))
     graph.add_node("feedback", _wrap(_feedback_node))
     graph.add_node("taste", _wrap(run_taste_learner))
+    graph.add_node("copilot", _wrap(run_copilot))
 
     graph.add_conditional_edges(
         START,
@@ -303,8 +317,9 @@ def build_graph():
     graph.add_conditional_edges(
         "taste",
         _route_taste,
-        {"generate": "generate", "end": END},
+        {"generate": "generate", "copilot": "copilot", "end": END},
     )
+    graph.add_edge("copilot", END)
 
     return graph.compile()
 

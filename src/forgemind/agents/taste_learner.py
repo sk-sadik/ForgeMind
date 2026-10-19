@@ -123,6 +123,7 @@ def run_taste_learner(state: S.ForgeMindState) -> S.ForgeMindState:
     else:
         state.phase = "done"
         detail = "taste updated; no loop" if not wants_refinement else "loops exhausted"
+    state.refinement_text = None  # consumed; never trigger a stale loop
 
     db.save_state(state)
     state.activity_log.append(
