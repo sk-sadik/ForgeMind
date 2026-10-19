@@ -278,10 +278,13 @@ def _mock_payload(schema_name: str, prompt: str, ctx: dict[str, Any]) -> Any:
         )
     if schema_name == "RankingOutput":
         ranked: list[S.ScoredCandidate] = ctx.get("ranked", [])
+        weights: dict[str, float] = ctx.get("weights") or {
+            "fit": 0.3, "novelty": 0.2, "feasibility": 0.2, "impact": 0.2, "critique": 0.1,
+        }
         return S.RankingOutput(
-            weights={"fit": 0.3, "novelty": 0.2, "feasibility": 0.2, "impact": 0.2, "critique": 0.1},
+            weights=weights,
             ranked=ranked[:3],
-            summary="Mock ranking: top candidates by weighted fit/novelty/feasibility.",
+            summary=f"Mock ranking: top {min(len(ranked), 3)} by weighted score.",
         )
     if schema_name == "TasteUpdate":
         return S.TasteUpdate(

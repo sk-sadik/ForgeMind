@@ -19,6 +19,11 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _last_wins(current: Any, new: Any) -> Any:
+    """Reducer for scalar fields written by parallel graph branches."""
+    return new
+
+
 # ---------------------------------------------------------------------------
 # Profile / interview
 # ---------------------------------------------------------------------------
@@ -263,16 +268,21 @@ class AgentActivity(BaseModel):
 class ForgeMindState(BaseModel):
     """Shared state passed between LangGraph nodes.
 
-    Lists that accumulate across nodes (chat messages, activity) use
-    `Annotated[..., operator.add]` reducers; everything else is replaced
-    by the node that writes it. The full model is persisted after every
-    node so a session can be resumed at any phase.
+    Fields that accumulate across nodes (chat messages, activity) use
+    ``Annotated[..., operator.add]`` reducers; ``phase`` uses a last-wins
+    reducer because the parallel novelty/feasibility branches both write
+    it; everything else is replaced by the node that writes it. The full
+    model is persisted after every node so a session can be resumed at
+    any phase.
     """
 
     session_id: str = "default"
-    phase: Literal[
-        "init", "interview", "scout", "generate", "evaluate",
-        "critic", "rank", "present", "feedback", "plan", "done",
+    phase: Annotated[
+        Literal[
+            "init", "interview", "scout", "generate", "evaluate",
+            "critic", "rank", "present", "feedback", "plan", "done",
+        ],
+        _last_wins,
     ] = "init"
     loop_count: int = Field(default=0, description="regeneration/refinement loops used")
     max_loops: int = 3
@@ -281,6 +291,10 @@ class ForgeMindState(BaseModel):
     profile: Profile = Field(default_factory=Profile)
     interview_turns: list[InterviewTurn] = Field(default_factory=list)
     pending_question: Optional[str] = None
+    pending_answers: list[str] = Field(
+        default_factory=list, description="scripted/UI answers consumed one per visit"
+    )
+    interview_visits: int = 0
 
     # Research + generation
     problems: list[ProblemRecord] = Field(default_factory=list)
