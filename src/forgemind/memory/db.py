@@ -61,6 +61,18 @@ class FeedbackRecord(SQLModel, table=True):
     created_at: str
 
 
+class TasteProfileRecord(SQLModel, table=True):
+    """Learned preference weights + embedding taste vector per session."""
+
+    __tablename__ = "taste_profiles"
+
+    session_id: str = Field(primary_key=True)
+    weights_json: str
+    vector_json: str
+    summary: str = ""
+    updated_at: str
+
+
 def init_db() -> None:
     """Create tables if missing."""
     SQLModel.metadata.create_all(_engine())
@@ -131,3 +143,47 @@ def record_feedback(session_id: str, candidate_id: str, action: str, comment: st
             )
         )
         session.commit()
+
+
+def save_taste(
+    session_id: str,
+    weights: dict[str, float],
+    vector: list[float],
+    summary: str = "",
+) -> None:
+    """Upsert the learned taste profile (weights + embedding vector)."""
+    with Session(_engine()) as session:
+        record = session.get(TasteProfileRecord, session_id)
+        weights_json = json.dumps(weights)
+        vector_json = json.dumps(vector)
+        if record is None:
+            session.add(
+                TasteProfileRecord(
+                    session_id=session_id,
+                    weights_json=weights_json,
+                    vector_json=vector_json,
+                    summary=summary,
+                    updated_at=_now(),
+                )
+            )
+        else:
+            record.weights_json = weights_json
+            record.vector_json = vector_json
+            record.summary = summary
+            record.updated_at = _now()
+            session.add(record)
+        session.commit()
+
+
+def load_taste(session_id: str) -> Optional[dict]:
+    """Load the taste profile as ``{weights, vector, summary, updated_at}``."""
+    with Session(_engine()) as session:
+        record = session.get(TasteProfileRecord, session_id)
+        if record is None:
+            return None
+        return {
+            "weights": json.loads(record.weights_json),
+            "vector": json.loads(record.vector_json),
+            "summary": record.summary,
+            "updated_at": record.updated_at,
+        }

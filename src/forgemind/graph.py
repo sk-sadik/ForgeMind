@@ -12,7 +12,17 @@ Flow::
                                      |            \\
                         (<5 survive & loops left)  else
                                      |              \\
-                                 generate          critic -> ranker -> present -> END
+                                 generate          critic -> ranker -> present
+                                                                          |
+                                                                       feedback
+                                                                        /     \\
+                                                 (refine + loops left) /       \\ (no feedback)
+                                                                        v         \\
+                                                                    taste --> generate
+                                                                        (else END)
+
+Sessions that start with ``pending_feedback`` (user swiped cards after a
+previous run) skip the interview and enter at ``feedback``.
 
 Every node persists the full state via ``memory.db.save_state`` (inside the
 agents + a wrapper-level save), so sessions can resume at any phase.
@@ -32,6 +42,7 @@ from .agents.interviewer import run_interview_step
 from .agents.novelty import run_novelty
 from .agents.ranker import run_ranker
 from .agents.scout import run_scout
+from .agents.taste_learner import run_taste_learner
 from .memory import db
 
 logger = logging.getLogger("forgemind.graph")
@@ -130,6 +141,65 @@ def _present(state: S.ForgeMindState) -> S.ForgeMindState:
 
 
 # ---------------------------------------------------------------------------
+# Feedback + taste loop
+# ---------------------------------------------------------------------------
+
+def _route_start(state: S.ForgeMindState | dict[str, Any]) -> str:
+    """Fresh sessions interview first; sessions carrying swipes go straight
+    to the feedback node (user reacted to a previous presentation)."""
+    state = _coerce(state)
+    return "feedback" if state.pending_feedback else "interview"
+
+
+def _feedback_node(state: S.ForgeMindState) -> S.ForgeMindState:
+    """Consume pending swipe feedback: record it, extract refinements,
+    and mark accept actions as the chosen candidate."""
+    state = state.model_copy(deep=True)
+    consumed = list(state.pending_feedback)
+    if not consumed:
+        state.activity_log.append(
+            S.AgentActivity(agent="feedback", status="done", detail="none pending")
+        )
+        return state
+
+    state.phase = "feedback"
+    refinements: list[str] = []
+    for fb in consumed:
+        state.feedback_history.append(fb)
+        db.record_feedback(state.session_id, fb.candidate_id, fb.action.value, fb.comment)
+        if fb.action == S.FeedbackAction.REFINE and fb.comment.strip():
+            refinements.append(fb.comment.strip())
+        elif fb.action == S.FeedbackAction.ACCEPT:
+            state.chosen_candidate_id = fb.candidate_id
+    if refinements:
+        state.refinement_text = " ".join(refinements)
+    state.pending_feedback = []
+
+    db.save_state(state)
+    state.activity_log.append(
+        S.AgentActivity(agent="feedback", status="done", detail=f"{len(consumed)} events")
+    )
+    return state
+
+
+def _route_feedback(state: S.ForgeMindState | dict[str, Any]) -> str:
+    state = _coerce(state)
+    return "taste" if state.phase == "feedback" else "end"
+
+
+def _route_taste(state: S.ForgeMindState | dict[str, Any]) -> str:
+    """Taste node sets phase='generate' when it wants a refinement loop."""
+    state = _coerce(state)
+    return "generate" if state.phase == "generate" else "end"
+
+
+def _ranker_node(state: S.ForgeMindState) -> S.ForgeMindState:
+    """Ranker with learned taste weight adjustments applied."""
+    state = _coerce(state)
+    return run_ranker(state, taste_adjustments=state.taste_weights or None)
+
+
+# ---------------------------------------------------------------------------
 # Node wrapper: JSON updates + reducer deltas + persistence per node
 # ---------------------------------------------------------------------------
 
@@ -198,10 +268,16 @@ def build_graph():
     graph.add_node("feasibility", _wrap(run_feasibility))
     graph.add_node("gate", _wrap(_filter_gate))
     graph.add_node("critic", _wrap(run_critic))
-    graph.add_node("ranker", _wrap(run_ranker))
+    graph.add_node("ranker", _wrap(_ranker_node))
     graph.add_node("present", _wrap(_present))
+    graph.add_node("feedback", _wrap(_feedback_node))
+    graph.add_node("taste", _wrap(run_taste_learner))
 
-    graph.add_edge(START, "interview")
+    graph.add_conditional_edges(
+        START,
+        _route_start,
+        {"interview": "interview", "feedback": "feedback"},
+    )
     graph.add_conditional_edges(
         "interview",
         _route_interview,
@@ -218,7 +294,17 @@ def build_graph():
     )
     graph.add_edge("critic", "ranker")
     graph.add_edge("ranker", "present")
-    graph.add_edge("present", END)
+    graph.add_edge("present", "feedback")
+    graph.add_conditional_edges(
+        "feedback",
+        _route_feedback,
+        {"taste": "taste", "end": END},
+    )
+    graph.add_conditional_edges(
+        "taste",
+        _route_taste,
+        {"generate": "generate", "end": END},
+    )
 
     return graph.compile()
 

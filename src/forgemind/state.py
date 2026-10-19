@@ -313,7 +313,15 @@ class ForgeMindState(BaseModel):
 
     # Feedback loop
     feedback_history: list[Feedback] = Field(default_factory=list)
+    pending_feedback: list[Feedback] = Field(
+        default_factory=list, description="swipes waiting to be consumed by the feedback node"
+    )
     refinement_text: Optional[str] = None
+    taste_weights: dict[str, float] = Field(
+        default_factory=dict, description="cumulative weight adjustments from Taste Learner"
+    )
+    taste_vector: list[float] = Field(default_factory=list)
+    taste_summary: str = ""
 
     # UX / observability (accumulate across nodes via reducers)
     chat: Annotated[list[dict[str, str]], operator.add] = Field(
