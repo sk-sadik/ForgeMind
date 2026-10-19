@@ -216,9 +216,15 @@ def _mock_payload(schema_name: str, prompt: str, ctx: dict[str, Any]) -> Any:
         ]
         return S.ScoutOutput(problems=problems)
     if schema_name == "GeneratorOutput":
-        style = "fusion" if "fusion" in prompt.lower() else (
-            "technical" if "technical" in prompt.lower() else "impact"
-        )
+        style = str(ctx.get("style") or "").lower()
+        if style not in {"impact", "technical", "fusion"}:
+            style = (
+                "fusion"
+                if "fusion" in prompt.lower()
+                else "technical"
+                if "technical" in prompt.lower()
+                else "impact"
+            )
         n = int(ctx.get("num_candidates", 3))
         cands = []
         for i in range(1, n + 1):
