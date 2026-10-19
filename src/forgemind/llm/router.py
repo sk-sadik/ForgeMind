@@ -192,25 +192,27 @@ def _mock_payload(schema_name: str, prompt: str, ctx: dict[str, Any]) -> Any:
             reason="mock: interview still in progress",
         )
     if schema_name == "ScoutOutput":
+        topics = ["AI agents", "developer tools", "hackathons"]
+        stypes: list[str] = ["web", "github", "reddit", "hn", "arxiv"]
+        n = min(int(ctx.get("num_problems", 3)), 10)
         problems = [
             S.ProblemRecord(
                 id=f"p{i}",
-                title=f"Real pain point #{i} in {topic}",
-                description=f"Developers report repeated friction with {topic}.",
-                evidence_summary=f"Multiple threads describe {topic} as time-consuming.",
+                title=f"Real pain point #{i} in {topics[(i - 1) % len(topics)]}",
+                description=(
+                    f"Developers report repeated friction with "
+                    f"{topics[(i - 1) % len(topics)]}."
+                ),
+                evidence_summary=(
+                    f"Multiple threads describe {topics[(i - 1) % len(topics)]} "
+                    "as time-consuming."
+                ),
                 source_url=_mock_url(i),
-                source_type=stype,
-                interest=topic,
+                source_type=stypes[(i - 1) % len(stypes)],
+                interest=topics[(i - 1) % len(topics)],
                 relevance=0.8,
             )
-            for i, (topic, stype) in enumerate(
-                zip(
-                    ["AI agents", "developer tools", "hackathons"],
-                    ["web", "github", "reddit"],
-                    strict=False,
-                ),
-                start=1,
-            )
+            for i in range(1, n + 1)
         ]
         return S.ScoutOutput(problems=problems)
     if schema_name == "GeneratorOutput":
