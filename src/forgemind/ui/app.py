@@ -17,11 +17,13 @@ import os
 
 import streamlit as st
 
-from .. import state as S
-from ..agents.interviewer import run_interview_step
-from ..graph import run_pipeline
-from ..memory import db
-from . import helpers as H
+# Absolute imports: streamlit executes this file as a top-level script
+# (__package__ is None), so package-relative imports would fail here.
+from forgemind import state as S
+from forgemind.agents.interviewer import run_interview_step
+from forgemind.graph import run_pipeline
+from forgemind.memory import db
+from forgemind.ui import helpers as H
 
 
 def _get_state(session_id: str) -> S.ForgeMindState:

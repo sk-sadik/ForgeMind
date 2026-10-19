@@ -3,9 +3,19 @@
 # Each agent role maps to a LiteLLM model string (provider/model) plus
 # pricing used for per-call cost logging (USD per 1M tokens).
 # Supported providers: anthropic, openai, ollama (and anything LiteLLM supports).
+#
+# Models verified against GET /v1/models for the configured key.
+# NOTE: claude-sonnet-4-20250514 (the original default) is NOT available to
+# this key — do not restore it.
+#
+# Temperature: the 5.5 family (sonnet-5-5 / haiku-5-5) accepts ONLY
+# temperature=1 (verified via litellm param validation); sampling control on
+# those roles comes from prompts. The critic uses claude-sonnet-4-6, which
+# supports real temperatures. Router also sets litellm.drop_params=True as a
+# safety net.
 
 defaults:
-  temperature: 0.4
+  temperature: 1.0
   max_tokens: 2048
   input_cost_per_mtok: 0.0
   output_cost_per_mtok: 0.0
@@ -13,74 +23,85 @@ defaults:
 roles:
   # Reasoning model: adaptive interview, synthesis, planning.
   interviewer:
-    model: anthropic/claude-sonnet-4-20250514
-    temperature: 0.5
+    model: anthropic/claude-sonnet-5-5
+    temperature: 1.0
     max_tokens: 1500
+    # pricing estimated for cost logging (verify against console.anthropic.com)
     input_cost_per_mtok: 3.0
     output_cost_per_mtok: 15.0
 
-  # Fast/cheap: tool-driven research sweep.
+  # Research sweep (high volume: cheap tier).
   scout:
-    model: openai/gpt-4o-mini
-    temperature: 0.2
+    # was: openai/gpt-4o-mini (0.15 / 0.60)
+    model: anthropic/claude-haiku-5-5
+    temperature: 1.0
     max_tokens: 3000
-    input_cost_per_mtok: 0.15
-    output_cost_per_mtok: 0.60
+    input_cost_per_mtok: 1.0
+    output_cost_per_mtok: 5.0
 
-  # Generators: three styles, two different models for diversity.
+  # Generators: three styles (prompt-driven diversity; temperature is
+  # locked to 1 on the 5.5 family).
   generator_impact:
-    model: anthropic/claude-sonnet-4-20250514
-    temperature: 0.8
+    model: anthropic/claude-sonnet-5-5
+    temperature: 1.0
     input_cost_per_mtok: 3.0
     output_cost_per_mtok: 15.0
 
   generator_technical:
-    model: openai/gpt-4o-mini
-    temperature: 0.8
-    input_cost_per_mtok: 0.15
-    output_cost_per_mtok: 0.60
+    # was: openai/gpt-4o-mini (0.15 / 0.60)
+    model: anthropic/claude-haiku-5-5
+    temperature: 1.0
+    input_cost_per_mtok: 1.0
+    output_cost_per_mtok: 5.0
 
   generator_fusion:
-    model: ollama/llama3.1:8b
-    temperature: 0.9
-    input_cost_per_mtok: 0.0
-    output_cost_per_mtok: 0.0
+    # was: ollama/llama3.1:8b (free, local)
+    model: anthropic/claude-sonnet-5-5
+    temperature: 1.0
+    input_cost_per_mtok: 3.0
+    output_cost_per_mtok: 15.0
 
-  # Evaluation: deliberately different models from the generators.
+  # Evaluation (cheap tier, temperature locked to 1 on haiku-5-5).
   novelty:
-    model: openai/gpt-4o-mini
-    temperature: 0.1
-    input_cost_per_mtok: 0.15
-    output_cost_per_mtok: 0.60
+    # was: openai/gpt-4o-mini (0.15 / 0.60)
+    model: anthropic/claude-haiku-5-5
+    temperature: 1.0
+    input_cost_per_mtok: 1.0
+    output_cost_per_mtok: 5.0
 
   feasibility:
-    model: ollama/llama3.1:8b
-    temperature: 0.2
-    input_cost_per_mtok: 0.0
-    output_cost_per_mtok: 0.0
+    # was: ollama/llama3.1:8b (free, local)
+    model: anthropic/claude-haiku-5-5
+    temperature: 1.0
+    input_cost_per_mtok: 1.0
+    output_cost_per_mtok: 5.0
 
-  # Critic must NOT share a model with any generator.
+  # Critic must NOT share a model with any generator (enforced by tests):
+  # claude-sonnet-4-6 differs from both sonnet-5-5 and haiku-5-5 generators
+  # AND supports real (low) temperatures for tight critique.
   critic:
-    model: openai/gpt-4o
+    # was: openai/gpt-4o (2.50 / 10.0)
+    model: anthropic/claude-sonnet-4-6
     temperature: 0.3
-    input_cost_per_mtok: 2.50
-    output_cost_per_mtok: 10.0
+    input_cost_per_mtok: 3.0
+    output_cost_per_mtok: 15.0
 
   ranker:
-    model: anthropic/claude-sonnet-4-20250514
-    temperature: 0.2
+    model: anthropic/claude-sonnet-5-5
+    temperature: 1.0
     input_cost_per_mtok: 3.0
     output_cost_per_mtok: 15.0
 
   taste_learner:
-    model: openai/gpt-4o-mini
-    temperature: 0.2
-    input_cost_per_mtok: 0.15
-    output_cost_per_mtok: 0.60
+    # was: openai/gpt-4o-mini (0.15 / 0.60)
+    model: anthropic/claude-haiku-5-5
+    temperature: 1.0
+    input_cost_per_mtok: 1.0
+    output_cost_per_mtok: 5.0
 
   copilot:
-    model: anthropic/claude-sonnet-4-20250514
-    temperature: 0.5
+    model: anthropic/claude-sonnet-5-5
+    temperature: 1.0
     max_tokens: 6000
     input_cost_per_mtok: 3.0
     output_cost_per_mtok: 15.0

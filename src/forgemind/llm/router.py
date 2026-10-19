@@ -19,9 +19,15 @@ from pathlib import Path
 from typing import Any, Type, TypeVar
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .. import state as S
+
+# Load .env (if present) exactly once at router import. Existing environment
+# variables always win (python-dotenv default: override=False), so tests and
+# shells that set FORGEMIND_MOCK explicitly are unaffected.
+load_dotenv()
 
 logger = logging.getLogger("forgemind.router")
 
@@ -341,6 +347,10 @@ def structured_call(
 
     # Real call via LiteLLM (imported lazily so mock mode needs no API stack).
     import litellm  # noqa: PLC0415
+
+    # Some models reject sampling params entirely (e.g. the 5.5 family only
+    # allows temperature=1). Drop unsupported params instead of raising.
+    litellm.drop_params = True
 
     schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
     messages: list[dict[str, str]] = [
