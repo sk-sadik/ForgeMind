@@ -64,6 +64,14 @@ AgentFn = Callable[[S.ForgeMindState], S.ForgeMindState]
 # ---------------------------------------------------------------------------
 
 def _interview_node(state: S.ForgeMindState) -> S.ForgeMindState:
+    if state.profile.is_complete and not state.pending_answers:
+        # Interview already done outside the graph (UI/CLI) or in a prior
+        # run: don't repeat questions or the farewell message.
+        state = state.model_copy(deep=True)
+        state.activity_log.append(
+            S.AgentActivity(agent="interview", status="done", detail="profile already complete")
+        )
+        return state
     answer: str | None = None
     if state.pending_question and state.pending_answers:
         state = state.model_copy(deep=True)

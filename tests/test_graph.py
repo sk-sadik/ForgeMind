@@ -155,3 +155,17 @@ def test_graph_compiles_to_plain_runnable() -> None:
 def test_present_message_lists_top_ideas() -> None:
     final = run_pipeline(ForgeMindState(session_id="e2e11", pending_answers=_answers()))
     assert any("Top ideas" in m["content"] for m in final.chat)
+
+
+def test_complete_profile_interview_node_is_skipped() -> None:
+    """UI/CLI-interviewed sessions must not re-ask or repeat the farewell."""
+    state = ForgeMindState(session_id="e2e12")
+    state.profile = Profile(
+        interests=["AI agents"], skills=["Python"], summary="done", is_complete=True
+    )
+    final = run_pipeline(state)
+    assert final.ranking is not None
+    farewells = [m for m in final.chat if "I have everything" in m["content"]]
+    assert farewells == []
+    skips = [a for a in final.activity_log if a.detail == "profile already complete"]
+    assert skips and skips[0].agent == "interview"
