@@ -2,9 +2,10 @@
 
 Every tool returns :class:`SearchResult` objects (title + http(s) URL +
 snippet + source). In ``FORGEMIND_MOCK`` mode tools return deterministic
-mock results without any network call; in live mode tool failures fall
-back to the same mock results (logged as a warning) so the pipeline
-never dies on a flaky endpoint.
+mock results without any network call. In live mode tool failures or empty
+responses return an empty list and are recorded in the tool-warning registry
+(:func:`record_tool_failure`) so the UI can show a clearly visible warning
+naming the failed tool — live mode NEVER silently substitutes mock data.
 """
 from __future__ import annotations
 
@@ -25,6 +26,28 @@ TIMEOUT = 15.0
 DEFAULT_HEADERS = {
     "User-Agent": "ForgeMind/0.1 (research; https://github.com/sk-sadik/ForgeMind)"
 }
+
+# ---------------------------------------------------------------------------
+# Visible failure registry (surfaced in the UI as warnings)
+# ---------------------------------------------------------------------------
+
+_tool_warnings: list[dict[str, str]] = []
+
+
+def record_tool_failure(tool: str, error: str) -> None:
+    """Record a live-mode tool failure/degradation for UI display."""
+    _tool_warnings.append({"tool": tool, "error": error})
+    logger.warning("tool %s degraded: %s", tool, error)
+
+
+def get_tool_warnings() -> list[dict[str, str]]:
+    """Return recorded tool failures (copy)."""
+    return [dict(w) for w in _tool_warnings]
+
+
+def clear_tool_warnings() -> None:
+    """Reset the failure registry (start of a new pipeline run)."""
+    _tool_warnings.clear()
 
 
 class SearchResult(BaseModel):

@@ -6,7 +6,13 @@ import pytest
 
 from forgemind.llm import router
 from forgemind.tools import arxiv_search, devpost, github_search, reddit_hn, web_search
-from forgemind.tools.common import SearchResult, dedupe, mock_fallback
+from forgemind.tools.common import (
+    SearchResult,
+    clear_tool_warnings,
+    dedupe,
+    get_tool_warnings,
+    mock_fallback,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -63,18 +69,22 @@ def test_dedupe_drops_non_http_and_duplicates() -> None:
     assert [r.url for r in out] == ["https://x.test/1", "https://y.test/2"]
 
 
-def test_live_failure_falls_back_to_mock(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Live mode (mock off) + broken endpoint -> mock fallback, no crash."""
+def test_live_failure_returns_empty_and_records_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live mode (mock off) + broken endpoint -> [] + visible warning, no mock."""
     monkeypatch.setenv("FORGEMIND_MOCK", "0")
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    clear_tool_warnings()
 
     def _boom(*args, **kwargs):
         raise httpx.ConnectError("boom")
 
     monkeypatch.setattr(httpx, "get", _boom)
     results = web_search.search("anything", k=3)
-    assert len(results) == 3
-    assert all(r.is_http() for r in results)
+    assert results == []
+    warnings = get_tool_warnings()
+    assert any(w["tool"] == "web_search" for w in warnings)
 
 
 def test_ddg_html_parse() -> None:

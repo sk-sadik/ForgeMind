@@ -10,7 +10,7 @@ import logging
 import httpx
 
 from ..llm import router
-from .common import SearchResult, dedupe, fetch, mock_fallback
+from .common import SearchResult, dedupe, fetch, mock_fallback, record_tool_failure
 
 logger = logging.getLogger("forgemind.tools.reddit_hn")
 
@@ -29,8 +29,8 @@ def search_reddit(query: str, k: int = 5) -> list[SearchResult]:
         )
         children = resp.json().get("data", {}).get("children", [])
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        logger.warning("reddit search failed (%s); using mock fallback", exc)
-        return mock_fallback("reddit", query, k)
+        record_tool_failure("reddit", f"{type(exc).__name__}: {exc}")
+        return []
     results = []
     for child in children:
         data = child.get("data", {})
@@ -60,8 +60,8 @@ def search_hn(query: str, k: int = 5) -> list[SearchResult]:
         )
         hits = resp.json().get("hits", [])
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        logger.warning("hn search failed (%s); using mock fallback", exc)
-        return mock_fallback("hn", query, k)
+        record_tool_failure("hn", f"{type(exc).__name__}: {exc}")
+        return []
     results = []
     for hit in hits:
         url = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"

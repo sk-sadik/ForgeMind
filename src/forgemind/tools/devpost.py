@@ -11,7 +11,7 @@ import re
 import httpx
 
 from ..llm import router
-from .common import SearchResult, dedupe, fetch, mock_fallback
+from .common import SearchResult, dedupe, fetch, mock_fallback, record_tool_failure
 
 logger = logging.getLogger("forgemind.tools.devpost")
 
@@ -42,9 +42,8 @@ def search(query: str, k: int = 5) -> list[SearchResult]:
         resp = fetch(_SEARCH_URL, params={"query": query})
         results = dedupe(_parse(resp.text), limit=k)
     except (httpx.HTTPError, ValueError) as exc:
-        logger.warning("devpost search failed (%s); using mock fallback", exc)
-        return mock_fallback("devpost", query, k)
+        record_tool_failure("devpost", f"{type(exc).__name__}: {exc}")
+        return []
     if not results:
-        logger.warning("devpost search empty for %r; using mock fallback", query)
-        return mock_fallback("devpost", query, k)
+        record_tool_failure("devpost", f"no results for query {query!r}")
     return results

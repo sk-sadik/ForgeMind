@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import httpx
 
 from ..llm import router
-from .common import SearchResult, dedupe, mock_fallback
+from .common import SearchResult, dedupe, mock_fallback, record_tool_failure
 
 logger = logging.getLogger("forgemind.tools.arxiv_search")
 
@@ -43,11 +43,11 @@ def search(query: str, k: int = 5) -> list[SearchResult]:
         resp = fetch_atom(query, k)
         results = _parse_atom(resp)
     except (httpx.HTTPError, ET.ParseError, ValueError) as exc:
-        logger.warning("arxiv search failed (%s); using mock fallback", exc)
-        return mock_fallback("arxiv", query, k)
+        record_tool_failure("arxiv", f"{type(exc).__name__}: {exc}")
+        return []
     results = dedupe(results, limit=k)
     if not results:
-        return mock_fallback("arxiv", query, k)
+        record_tool_failure("arxiv", f"no results for query {query!r}")
     return results
 
 

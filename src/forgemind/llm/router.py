@@ -88,6 +88,18 @@ def mock_mode() -> bool:
     return os.getenv("FORGEMIND_MOCK", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def list_models() -> dict[str, str]:
+    """Role → model mapping currently in effect (config/models.yaml)."""
+    cfg = _load_config()
+    roles = dict(cfg.get("roles") or {})
+    defaults = cfg.get("defaults") or {}
+    default_model = str(defaults.get("model", ""))
+    return {
+        role: str(spec.get("model") or default_model)
+        for role, spec in roles.items()
+    }
+
+
 def _load_config() -> dict[str, Any]:
     if not _CONFIG_PATH.exists():
         raise FileNotFoundError(f"models config not found: {_CONFIG_PATH}")

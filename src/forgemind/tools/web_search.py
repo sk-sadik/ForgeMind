@@ -13,7 +13,7 @@ import urllib.parse
 import httpx
 
 from ..llm import router
-from .common import SearchResult, dedupe, fetch, mock_fallback
+from .common import SearchResult, dedupe, fetch, mock_fallback, record_tool_failure
 
 logger = logging.getLogger("forgemind.tools.web_search")
 
@@ -76,7 +76,12 @@ def _duckduckgo(query: str, k: int) -> list[SearchResult]:
 
 
 def search(query: str, k: int = 5) -> list[SearchResult]:
-    """Run a web search; returns up to ``k`` http(s)-URL results."""
+    """Run a web search; returns up to ``k`` http(s)-URL results.
+
+    Mock mode: deterministic fallback results. Live mode: failures and empty
+    responses return ``[]`` and are recorded as visible tool warnings —
+    no silent mock substitution.
+    """
     k = min(k, _MAX_K)
     if router.mock_mode():
         return mock_fallback("web", query, k)
@@ -87,10 +92,9 @@ def search(query: str, k: int = 5) -> list[SearchResult]:
             else _duckduckgo(query, k)
         )
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        logger.warning("web_search failed (%s); using mock fallback", exc)
-        return mock_fallback("web", query, k)
+        record_tool_failure("web_search", f"{type(exc).__name__}: {exc}")
+        return []
     results = dedupe(results, limit=k)
     if not results:
-        logger.warning("web_search returned nothing for %r; using mock fallback", query)
-        return mock_fallback("web", query, k)
+        record_tool_failure("web_search", f"no results for query {query!r} (blocked or empty)")
     return results

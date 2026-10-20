@@ -11,7 +11,7 @@ import os
 import httpx
 
 from ..llm import router
-from .common import SearchResult, dedupe, mock_fallback
+from .common import SearchResult, dedupe, mock_fallback, record_tool_failure
 
 logger = logging.getLogger("forgemind.tools.github_search")
 
@@ -36,8 +36,8 @@ def search(query: str, k: int = 5) -> list[SearchResult]:
         resp.raise_for_status()
         items = resp.json().get("items", [])
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        logger.warning("github search failed (%s); using mock fallback", exc)
-        return mock_fallback("github", query, k)
+        record_tool_failure("github", f"{type(exc).__name__}: {exc}")
+        return []
     results = [
         SearchResult(
             title=str(item.get("full_name") or query),
