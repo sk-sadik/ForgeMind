@@ -149,7 +149,7 @@ def run_scout(state: S.ForgeMindState) -> S.ForgeMindState:
     )
     debug_log.record(
         "scout_output",
-        model=router.get_llm("scout").model,
+        model=router.last_model_used("scout") or router.get_llm("scout").model,
         problems=[p.model_dump(mode="json") for p in output.problems],
     )
 

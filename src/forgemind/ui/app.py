@@ -25,6 +25,7 @@ from forgemind.agents import debug_log
 from forgemind.agents.interviewer import run_interview_step
 from forgemind.graph import run_pipeline
 from forgemind.llm import router
+from forgemind.llm.errors import LLMUnavailableError
 from forgemind.memory import db
 from forgemind.tools.common import clear_tool_warnings, get_tool_warnings
 from forgemind.ui import helpers as H
@@ -44,12 +45,21 @@ def _get_state(session_id: str) -> S.ForgeMindState:
 
 
 def _run_pipeline_ui(state: S.ForgeMindState) -> None:
-    """Run the pipeline, failing loudly with the real error on screen."""
+    """Run the pipeline, failing loudly with the real error on screen.
+
+    LLMUnavailableError gets a friendly message + fix suggestion (no
+    traceback); session state is kept so the user can fix the config/key
+    and retry from the same screen.
+    """
     clear_tool_warnings()
     debug_log.clear()
     try:
         with st.spinner("Scouting, generating, evaluating, ranking..."):
             st.session_state["state"] = run_pipeline(state)
+    except LLMUnavailableError as exc:
+        st.error(str(exc))
+        st.caption("Fix the issue above, then press the button again — your session is kept.")
+        return
     except Exception as exc:  # surfaced, never swallowed
         st.error(f"Pipeline failed: {type(exc).__name__}: {exc}")
         tail = traceback.format_exc().strip().splitlines()[-8:]
@@ -77,6 +87,8 @@ def _sidebar() -> S.ForgeMindState:
         f"**Phase:** {H.phase_label(state.phase)}  \n"
         f"**Loops:** {state.loop_count}/{state.max_loops}"
     )
+    if not router.mock_mode():
+        _availability_panel()
 
     if state.pending_feedback:
         st.sidebar.warning(f"{len(state.pending_feedback)} feedback event(s) queued")
@@ -103,6 +115,29 @@ def _mode_banner() -> None:
         models = router.list_models()
         shown = ", ".join(f"{r}={m}" for r, m in sorted(models.items())[:6])
         st.success(f"LIVE MODE — models: {shown}")
+
+
+def _availability_panel() -> None:
+    """Sidebar per-role model status (green/red) — key check only, no calls."""
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_check() -> dict[str, list[dict]]:
+        return router.check_availability()
+
+    try:
+        status = _cached_check()
+    except Exception as exc:  # noqa: BLE001 — preflight must never crash the UI
+        st.sidebar.warning(f"Model status unavailable: {type(exc).__name__}: {exc}")
+        return
+    st.sidebar.markdown("**Model status**")
+    for role in sorted(status):
+        entries = status[role]
+        ok = any(e["ok"] for e in entries)
+        primary = entries[0] if entries else {"model": "?", "reason": "no model"}
+        detail = primary["model"] if ok else "; ".join(
+            f"{e['model']}: {e['reason']}" for e in entries if not e["ok"]
+        )
+        st.sidebar.markdown(f"{'[OK]' if ok else '[FAIL]'} `{role}` — {detail}")
 
 
 def _tool_warnings_panel() -> None:
@@ -197,7 +232,12 @@ def _interview_view(state: S.ForgeMindState) -> None:
         submitted = st.form_submit_button("Send", type="primary")
 
     if submitted and answer.strip():
-        st.session_state["state"] = run_interview_step(state, answer.strip())
+        try:
+            st.session_state["state"] = run_interview_step(state, answer.strip())
+        except LLMUnavailableError as exc:
+            st.error(str(exc))
+            st.caption("Fix the issue above, then send your answer again — your session is kept.")
+            return
         st.rerun()
 
     if st.button("Finish interview early (use profile as-is)"):

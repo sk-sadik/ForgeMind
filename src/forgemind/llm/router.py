@@ -1,11 +1,15 @@
 """LiteLLM-based model router.
 
 Responsibilities:
-- Map agent roles to model strings via ``config/models.yaml``.
+- Map agent roles to an ordered model FALLBACK CHAIN via ``config/models.yaml``.
 - ``structured_call(role, prompt, schema)`` -> validated Pydantic object.
-- Automatic retry (max 2) on JSON/validation failure.
+- On billing/auth/rate-limit/model-not-found/connection errors, move to the
+  next model in the chain; if all fail, raise :class:`LLMUnavailableError`
+  listing every model and its friendly error (never a silent mock fallback).
+- Automatic retry (max 2) per model on JSON/validation failure.
 - MOCK mode (``FORGEMIND_MOCK=1``): deterministic fake outputs, no keys needed.
-- Log token usage and estimated cost per call.
+- Log token usage, estimated cost, and the model actually used per call.
+- ``check_availability()``: key/reachability preflight (no paid calls).
 """
 from __future__ import annotations
 
@@ -23,6 +27,24 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .. import state as S
+from .errors import FALLBACK_CODES, LLMUnavailableError, classify_llm_error
+
+__all__ = [
+    "LLMUnavailableError",
+    "ModelSpec",
+    "CallRecord",
+    "structured_call",
+    "get_llm",
+    "list_models",
+    "list_model_chains",
+    "check_availability",
+    "classify_llm_error",
+    "last_model_used",
+    "mock_mode",
+    "get_call_log",
+    "reset_call_log",
+    "total_cost_usd",
+]
 
 # Load .env (if present) exactly once at router import. Existing environment
 # variables always win (python-dotenv default: override=False), so tests and
@@ -37,17 +59,33 @@ MAX_RETRIES = 2
 _CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+# Provider prefix -> env var required for a paid (non-Ollama) provider.
+_PROVIDER_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "together_ai": "TOGETHERAI_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+}
+
 
 @dataclass
 class ModelSpec:
-    """Resolved model configuration for a role."""
+    """Resolved model configuration for a role (ordered fallback chain)."""
 
     role: str
-    model: str
+    model: str = ""  # primary (first) model; kept for backward compatibility
     temperature: float = 0.4
     max_tokens: int = 2048
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0
+    models: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.models:
+            self.models = [self.model] if self.model else []
+        elif not self.model:
+            self.model = self.models[0]
 
 
 @dataclass
@@ -63,9 +101,11 @@ class CallRecord:
     cost_usd: float = 0.0
     attempts: int = 1
     mock: bool = False
+    fallback_from: str = ""  # primary model skipped before `model` (if any)
 
 
 _call_log: list[CallRecord] = []
+_last_model_used: dict[str, str] = {}
 
 
 def get_call_log() -> list[CallRecord]:
@@ -74,8 +114,16 @@ def get_call_log() -> list[CallRecord]:
 
 
 def reset_call_log() -> None:
-    """Clear recorded calls (used by tests)."""
+    """Clear recorded calls and last-model map (used by tests)."""
     _call_log.clear()
+    _last_model_used.clear()
+
+
+def last_model_used(role: str = "") -> str:
+    """Model that actually served the most recent call ("" if none yet)."""
+    if role:
+        return _last_model_used.get(role, "")
+    return next(reversed(_last_model_used.values()), "")
 
 
 def total_cost_usd() -> float:
@@ -88,16 +136,49 @@ def mock_mode() -> bool:
     return os.getenv("FORGEMIND_MOCK", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def list_models() -> dict[str, str]:
-    """Role → model mapping currently in effect (config/models.yaml)."""
+def _cheap_mode_enabled(cfg: dict[str, Any]) -> bool:
+    """cheap_mode comes from config/models.yaml or FORGEMIND_CHEAP_MODE=1."""
+    if os.getenv("FORGEMIND_CHEAP_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return bool(cfg.get("cheap_mode", False))
+
+
+def _role_models(cfg: dict[str, Any], role: str, role_cfg: dict[str, Any]) -> list[str]:
+    """Resolve the ordered model chain for a role (cheap mode applied)."""
+    raw = role_cfg.get("models")
+    if isinstance(raw, str):
+        models = [raw]
+    elif isinstance(raw, (list, tuple)):
+        models = [str(m).strip() for m in raw if str(m).strip()]
+    else:
+        single = role_cfg.get("model")
+        models = [str(single).strip()] if single else []
+    if not models:
+        models = ["openai/gpt-4o-mini"]
+
+    cheap_model = str(cfg.get("cheap_model") or "").strip()
+    cheap_roles = [str(r) for r in (cfg.get("cheap_roles") or [])]
+    if cheap_model and _cheap_mode_enabled(cfg) and role in cheap_roles:
+        models = [cheap_model] + [m for m in models if m != cheap_model]
+    return models
+
+
+def list_model_chains() -> dict[str, list[str]]:
+    """Role -> ordered model chain currently in effect (config/models.yaml)."""
     cfg = _load_config()
-    roles = dict(cfg.get("roles") or {})
-    defaults = cfg.get("defaults") or {}
-    default_model = str(defaults.get("model", ""))
-    return {
-        role: str(spec.get("model") or default_model)
-        for role, spec in roles.items()
-    }
+    defaults = dict(cfg.get("defaults") or {})
+    chains: dict[str, list[str]] = {}
+    for role, spec in (cfg.get("roles") or {}).items():
+        role_cfg = dict(defaults)
+        role_cfg.update(spec or {})
+        chains[role] = _role_models(cfg, role, role_cfg)
+    return chains
+
+
+def list_models() -> dict[str, str]:
+    """Role -> primary model mapping currently in effect (config/models.yaml)."""
+    return {role: (chain[0] if chain else "")
+            for role, chain in list_model_chains().items()}
 
 
 def _load_config() -> dict[str, Any]:
@@ -108,7 +189,7 @@ def _load_config() -> dict[str, Any]:
 
 
 def get_llm(role: str) -> ModelSpec:
-    """Resolve a role to a ModelSpec using config/models.yaml.
+    """Resolve a role to a ModelSpec (ordered fallback chain) from models.yaml.
 
     Unknown roles fall back to a cheap default model so the graph never
     hard-crashes on a typo'd role.
@@ -119,14 +200,59 @@ def get_llm(role: str) -> ModelSpec:
     role_cfg.update((cfg.get("roles") or {}).get(role, {}))
     if role not in (cfg.get("roles") or {}) and role != "default":
         logger.warning("role %r not in models.yaml; using defaults", role)
+    models = _role_models(cfg, role, role_cfg)
     return ModelSpec(
         role=role,
-        model=str(role_cfg.get("model", "openai/gpt-4o-mini")),
+        model=models[0],
+        models=models,
         temperature=float(role_cfg.get("temperature", 0.4)),
         max_tokens=int(role_cfg.get("max_tokens", 2048)),
         input_cost_per_mtok=float(role_cfg.get("input_cost_per_mtok", 0.0)),
         output_cost_per_mtok=float(role_cfg.get("output_cost_per_mtok", 0.0)),
     )
+
+
+# ---------------------------------------------------------------------------
+# Startup availability check (NO paid calls)
+# ---------------------------------------------------------------------------
+
+_OLLAMA_TIMEOUT = 2.0
+
+
+def _check_model(model: str) -> tuple[bool, str]:
+    """(ok, reason) for one model — key presence or Ollama reachability."""
+    provider = model.split("/", 1)[0].lower() if "/" in model else ""
+    if provider == "ollama":
+        base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        try:
+            import httpx  # local import: router stays importable without it
+
+            resp = httpx.get(f"{base}/api/tags", timeout=_OLLAMA_TIMEOUT)
+            if resp.status_code == 200:
+                return True, f"reachable ({base})"
+            return False, f"HTTP {resp.status_code} from {base} — run `ollama serve`"
+        except Exception as exc:  # noqa: BLE001 — any transport failure = down
+            return False, f"not reachable ({type(exc).__name__}) — run `ollama serve`"
+    env_var = _PROVIDER_KEY_ENV.get(provider)
+    if env_var is None:
+        return True, f"provider '{provider}': key cannot be verified without a call"
+    key = os.getenv(env_var, "").strip()
+    if not key:
+        return False, f"{env_var} not set in .env"
+    return True, f"{env_var} present"
+
+
+def check_availability() -> dict[str, list[dict[str, Any]]]:
+    """Preflight every role's model chain WITHOUT making paid LLM calls.
+
+    Returns ``role -> [{"model", "ok", "reason"}, ...]``; a role is healthy
+    when at least one model in its chain is ok (green), else red.
+    """
+    chains = list_model_chains()
+    return {
+        role: [{"model": m, **dict(zip(("ok", "reason"), _check_model(m)))} for m in chain]
+        for role, chain in chains.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +470,12 @@ def structured_call(
 ) -> T:
     """Run a structured LLM call for ``role`` and return a validated ``schema``.
 
-    Retries up to MAX_RETRIES times on JSON parse or validation failure.
-    In MOCK mode returns a deterministic fake object with zero cost.
+    Tries each model in the role's fallback chain in order, moving to the
+    next on billing/auth/rate-limit/model-not-found/connection errors.
+    Each model retries up to MAX_RETRIES times on JSON/validation failure.
+    If every model fails, raises :class:`LLMUnavailableError` listing each
+    model and its friendly error (never a silent mock fallback). In MOCK
+    mode returns a deterministic fake object with zero cost.
     """
     spec = get_llm(role)
     ctx = context or {}
@@ -354,7 +484,8 @@ def structured_call(
     if mock_mode():
         payload = _mock_payload(schema.__name__, prompt, ctx)
         result = _validate(schema, payload)
-        _record(spec, schema, started, attempts=1, mock=True)
+        _record(spec, schema, started, attempts=1, mock=True, model=spec.model)
+        _last_model_used[role] = spec.model
         return result
 
     # Real call via LiteLLM (imported lazily so mock mode needs no API stack).
@@ -374,11 +505,75 @@ def structured_call(
         {"role": "user", "content": f"{prompt}\n\nJSON Schema:\n{schema_json}"},
     ]
 
+    model_errors: list[dict[str, Any]] = []
+    for model in spec.models:
+        try:
+            result, attempts, prompt_tokens, completion_tokens = _attempt_model(
+                litellm, model, spec, messages, schema, role
+            )
+        except Exception as exc:  # noqa: BLE001 — classified per model below
+            if isinstance(exc, (json.JSONDecodeError, ValidationError, ValueError)):
+                code = "invalid_output"
+                friendly = f"invalid JSON output for schema {schema.__name__}: {exc}"
+            else:
+                code, friendly = classify_llm_error(exc)
+            model_errors.append(
+                {
+                    "model": model,
+                    "code": code,
+                    "message": friendly,
+                    "exception": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            logger.warning(
+                "model %s failed for role=%s [%s]: %s — %s",
+                model, role, code, friendly,
+                "trying next model" if code in FALLBACK_CODES else "giving up",
+            )
+            continue
+
+        cost = (
+            prompt_tokens / 1e6 * spec.input_cost_per_mtok
+            + completion_tokens / 1e6 * spec.output_cost_per_mtok
+        )
+        _record(
+            spec, schema, started, attempts=attempts, model=model,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cost_usd=cost,
+            fallback_from=(spec.models[0] if spec.models[0] != model else ""),
+        )
+        _last_model_used[role] = model
+        _record_debug_call(role, model, schema.__name__, attempts, spec.models)
+        if model_errors:
+            logger.warning(
+                "role=%s recovered on fallback model %s after %d failure(s)",
+                role, model, len(model_errors),
+            )
+        return result
+
+    raise LLMUnavailableError(role, model_errors)
+
+
+def _attempt_model(
+    litellm: Any,
+    model: str,
+    spec: ModelSpec,
+    messages: list[dict[str, str]],
+    schema: Type[T],
+    role: str,
+) -> tuple[T, int, int, int]:
+    """Call one model with per-model JSON retries.
+
+    Returns ``(result, attempts, prompt_tokens, completion_tokens)``.
+    API/provider errors propagate immediately (handled by the fallback
+    chain in :func:`structured_call`); only JSON/validation failures retry.
+    """
+    working = list(messages)
     last_error: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + up to 2 retries
         response = litellm.completion(
-            model=spec.model,
-            messages=messages,
+            model=model,
+            messages=working,
             temperature=spec.temperature,
             max_tokens=spec.max_tokens,
             response_format={"type": "json_object"},
@@ -390,11 +585,11 @@ def structured_call(
         except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = exc
             logger.warning(
-                "structured_call retry %d/%d role=%s error=%s",
-                attempt, MAX_RETRIES + 1, role, exc,
+                "structured_call retry %d/%d role=%s model=%s error=%s",
+                attempt, MAX_RETRIES + 1, role, model, exc,
             )
-            messages.append({"role": "assistant", "content": text})
-            messages.append(
+            working.append({"role": "assistant", "content": text})
+            working.append(
                 {
                     "role": "user",
                     "content": (
@@ -407,20 +602,28 @@ def structured_call(
         usage = getattr(response, "usage", None)
         prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-        cost = (
-            prompt_tokens / 1e6 * spec.input_cost_per_mtok
-            + completion_tokens / 1e6 * spec.output_cost_per_mtok
-        )
-        _record(
-            spec, schema, started, attempts=attempt,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            cost_usd=cost,
-        )
-        return result
+        return result, attempt, prompt_tokens, completion_tokens
+    raise ValueError(
+        f"model {model} returned invalid output for role={role} "
+        f"schema={schema.__name__} after {MAX_RETRIES + 1} attempts: {last_error}"
+    )
 
-    raise RuntimeError(
-        f"structured_call failed for role={role} schema={schema.__name__} "
-        f"after {MAX_RETRIES + 1} attempts: {last_error}"
+
+def _record_debug_call(
+    role: str, model: str, schema_name: str, attempts: int, chain: list[str]
+) -> None:
+    """Push the model actually used into the UI debug-panel registry."""
+    try:
+        from ..agents import debug_log  # lazy: avoids import cycles
+    except Exception:  # noqa: BLE001 — debug logging must never break calls
+        return
+    debug_log.record(
+        "llm_call",
+        role=role,
+        model=model,
+        schema=schema_name,
+        attempts=attempts,
+        fallback_chain=chain,
     )
 
 
@@ -434,10 +637,12 @@ def _record(
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
     cost_usd: float = 0.0,
+    model: str = "",
+    fallback_from: str = "",
 ) -> None:
     rec = CallRecord(
         role=spec.role,
-        model=spec.model,
+        model=model or spec.model,
         schema_name=schema.__name__,
         duration_ms=int((time.perf_counter() - started) * 1000),
         prompt_tokens=prompt_tokens,
@@ -445,10 +650,12 @@ def _record(
         cost_usd=cost_usd,
         attempts=attempts,
         mock=mock,
+        fallback_from=fallback_from,
     )
     _call_log.append(rec)
     logger.info(
-        "llm call role=%s model=%s schema=%s attempts=%d tokens=%d/%d cost=$%.6f mock=%s",
+        "llm call role=%s model=%s schema=%s attempts=%d tokens=%d/%d cost=$%.6f mock=%s%s",
         rec.role, rec.model, rec.schema_name, rec.attempts,
         rec.prompt_tokens, rec.completion_tokens, rec.cost_usd, rec.mock,
+        f" (after fallback from {rec.fallback_from})" if rec.fallback_from else "",
     )

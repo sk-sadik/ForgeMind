@@ -245,7 +245,7 @@ def _generate_style(
         system=_SYSTEM_PROMPT,
         context={"style": style, "num_candidates": CANDIDATES_PER_STYLE},
     )
-    model = router.get_llm(role).model
+    model = router.last_model_used(role) or router.get_llm(role).model
     debug_log.record(
         "generator_call",
         style=style,
